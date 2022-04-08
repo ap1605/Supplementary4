@@ -1,511 +1,605 @@
 - [Introduction](#introduction)
-  * [What does this package do?](#what-does-this-package-do)
+  * [What is Docker?](#what-is-docker)
+  * [How are we going to use Docker?](#how-are-we-going-to-use-docker)
+  * [What does the microservice do?](#what-does-the-microservice-do)
 - [Steps to integrate a change and deploy it](#steps-to-integrate-a-change-and-deploy-it)
   * [Setting up the Build Environment](#setting-up-the-build-environment)
-      - [Short Intro to Pipenv](#short-intro-to-pipenv)
   * [Testing](#testing)
-  * [Packaging](#packaging)
+      - [Running the Webserver and Docker Compose](#running-the-webserver-and-docker-compose)
+      - [The Dockerfile](#the-dockerfile)
+      - [Using Docker Compose with our Dockerfile](#using-docker-compose-with-our-dockerfile)
   * [Distributing](#distributing)
 - [Automating CI/CD using Pipelines](#automating-ci-cd-using-pipelines)
-  * [Pipelines](#pipelines)
   * [The `build` Stage](#the-build-stage)
   * [The `test` Stage](#the-test-stage)
-  * [The `package` Stage](#the-package-stage)
-  * [The `deploy` Stage](#the-deploy-stage)
-  * [Invoking the Pipeline](#invoking-the-pipeline)
+  * [The `dockerize` Stage](#the-dockerize-stage)
+  * [Testing the deployed image](#testing-the-deployed-image)
 
 # Introduction
 
-The goal of this exercise is to create a CI/CD (Continuous Integration /
-Continuous Delivery) pipeline on a GitLab repository such that a source code
-push on the repository automatically triggers a pipeline that performs:
+In Part 1 of the exercise, we learned how to integrate simple unit testing for a
+Python package using pytest into a pipeline.  Now what if the software we want
+to test is much more complicated than that Python package?
 
-1. Integration: Making sure the source code compiles and all unit tests pass before allowing the push to be merged.
+Let's say the software we wanted to test was an entire microservice running on a
+web server with a database backend.  And suppose we wanted to do integration
+testing and systems testing to make sure that the system
+works well as a whole (precluding any mocking for the database system and other external systems).  For complex software like this, it takes a lot of care
+and effort to set up the preconditions correctly before each test run.  Things
+that you could easily get wrong are:
 
-2. Delivery: Packaging the code into a distributable (called a "wheel" in
-   Python) and deploying it to the end-users (the Python Package Index
-pypi.org repository in case of Python).
+* Not having the correct web server version installed on your system.
+* Having the correct web server but not not configuring it corretly.
+* Not having the database server running in your system.
+* Having the database running but not initialized with the correct data set.
 
-The unit tests (an potentially other tests) in the automated pipeline
-provide the quality control and confidence necessary to allow developers to
-push code to the central repository directly and have it immediately
-delivered to the end users.  That is why it is often said that Continuous
-Testing (CT) is a prerequisite for CI and CD.
+If your dedicated test machine is used to test other software that needs
+web servers of different versions configured differently with their own data sets
+stored in databases, you can imagine what kind of issues you may have.  And
+using the same test machine to test multiple projects concurrently becomes
+unthinkable.
 
-Having a single repository for the entire organization cuts down on
-operating costs that comes from having to maintain multiple "beta branches"
-for the multiple beta feature developments going on in the organization, and
-having to merge those branches into one deployment version on delivery
-dates.  The difficulty of merging these branches is often the reason for
-delivery delays.
+Dockers solve all of the above problems in one shot.
 
-## What does this package do?
+## What is Docker?
 
-You can install this package from the python package manager `pip` with `pip install simple-strop`. Once installed, you should be able to see package listed when you do `pip list`.  The package has 2 modules (that aren't tests): `operations.py` and `utils.py`. An example usage is below:
+Docker is an OS-level virtualization software that allows you to run a
+light-weight Linux virtual machine with all necessary software pre-installed on
+the host OS.  The host OS can be either Linux, MacOS, or Windows.  The
+virtualized execution environment that software runs in is called a "Docker
+container".  The read-only template used to build containers is called a "Docker
+image".  Images are read-only so any changes to the file system or otherwise
+done to the execution environment in the container does not modify the image ---
+they are discarded when the container terminates.  This is a very useful
+property for us since it means that you can recreate the exact same execution
+environment every time you create a container, ensuring reproducibility.
+
+## How are we going to use Docker?
+
+We are going to use Docker in two ways for our testing purposes:
+
+1. We are going to create a Docker image containing our microservice along with
+   the web server we want to run it on.  We are going to use the Flask web
+framework along with the included web server.
+
+1. We are going to download a pre-created Docker image of the PostgreSQL
+   database server from [Docker Hub][6].
+
+Each time we run our test, we are going to create two containers from these two
+images.  The two servers in the two containers will communicate over the network
+through a TCP/IP port just like as they would in a real system.  There is a tool
+in Docker that is designed specifically for this scenario where you have to
+launch a system that is composed of multiple containers called "Docker compose"
+that you will use later on.
+
+The advantage of course is that it does not matter whether Flask or PostgreSQL
+is installed on the host machine, or what state they are in.  The tests will run
+uniformly no matter what.  You can even have multiple tests of multiple projects
+using different versions of Flask and PostgreSQL run concurrently without
+stepping on each others' toes.
+
+## What does the microservice do?
+
+A microservice is an application that provides a "small" service.  This service
+can be as simple as providing a bunch of string operations such as the ones in
+simple_strop that we tested in Part 1.  In fact, simple_strop is exactly what we
+are going to build our example microservice out of.  The service is presented to
+the outside world as a bunch of APIs accessible through the internet, typically
+using the HTTP protocol.  JSON (JavaScript Object Notation) is often used to
+format data that is passed to and from the API endpoints.  So a microservice is
+essentially a web application hosted on a web server, but is used to service
+data requests rather than present a viewable web page to the end user.
+
+This particular microservice is written in python using the [Flask][5] web
+framework.  In addition to the two main functions (`reverse` and `piglatin`)
+from simple_strop, the web server provides a simple authentication system (not
+safe for use in a production environment without improvements outside of the
+scope of this application) that will allow us to save the history of commands a
+user sent to our server.
+
+Here is an example interaction with the microservice:
 
 ```python
-$ python
->>> import simple_strop as ss
->>> sample_string = 'This is my sample string'
->>> ss.reverse(sample_string)
-'gnirts elpmas ym si sihT'
->>> ss.piglatin(sample_string)
-'Isthay isway myay amplesay ingstray'
->>> ss.is_capitalized(sample_string)
-True
->>> ss.is_all_caps(sample_string)
-False
->>> ss.is_vowel('y')
-False
->>> ss.is_consonant('q')
-True
->>> exit()
+>>> from requests import get, post
+>>> get('http://localhost:80/').json()
+{'message': 'System online.'}
+>>> post('http://localhost:80/register', json={'username':'wonsun', 'password':'password'}).json()
+{'message': 'User "wonsun" registered succesfully.'}
+>>> post('http://localhost:80/authenticate', json={'username':'wonsun', 'password':'password'}).json()
+{'token': '916c22895064c363b03634d580da0762'}
+>>> post('http://localhost:80/reverse', headers={'Authorization':'916c22895064c363b03634d580da0762'}, json={'input': 'This is my string to reverse'}).json()
+{'output': 'esrever ot gnirts ym si sihT'}
+>>> post('http://localhost:80/piglatin', headers={'Authorization':'916c22895064c363b03634d580da0762'}, json={'input': 'This is my string to convert to piglatin'}).json()
+{'output': 'Isthay isway myay ingstray otay onvertcay otay iglatinpay'}
+>>> get('http://localhost:80/get-history', headers={'Authorization':'916c22895064c363b03634d580da0762'}).json()
+{'history': [{'function': 'reverse', 'input': 'This is my string to reverse', 'output': 'esrever ot gnirts ym si sihT', 'time': 'Sat, 10 Apr 2021 19:59:53 GMT', 'user': 'wonsun'}, {'function': 'piglatin', 'input': 'This is my string to convert to piglatin', 'output': 'Isthay isway myay ingstray otay onvertcay otay iglatinpay', 'time': 'Sat, 10 Apr 2021 20:00:51 GMT', 'user': 'wonsun'}]}
 ```
 
-So where did the simple-strop package come from?  It came from the Python
-Package Index (PyPI) repository aforementioned.  The URL for the
-simple-strop package in PyPI is: https://pypi.org/project/simple-strop/.
-
-By the end of this exercise, you will have learned how to creat a CI/CD
-pipeline that builds a package of your own and deploys it to PyPI.
+As you can see, this server accepts either a GET or POST request (depending on
+the endpoint) with all of the arguments specified in the request JSON.  If you
+want to learn more about making HTTP requests via python, I recommend reading
+the python package [requests][1].  It is with that package that I prepared the
+example here:
 
 # Steps to integrate a change and deploy it
 
-On every source code modification, the following steps must happen to have
-CI/CD: 1) Setting up the build environment, 2) Testing, 3) Packaging, and 4)
-Distributing.  We will describe each step in more detail using our example.
-Later, we will talk about how to automate all these steps as part of a pipeline
-using GitLab.
+Just like in Part 1 of the exercise, we want to create a series of steps that
+culminate in deployment.  In this case, it is going to happen in three steps: 1)
+Setting up the build environment, 2) Testing, and 3) Distributing.  Also, in
+Part 1, we distributed our software by uploading a Python package to PyPI.  For
+Part 2, we are going to create a Docker image of our microservice and push it to
+GitLab's repository-specific registry as part of the distribution step.  The
+registry is accessible through `Packages & Registries > Container Registry` on
+your GitLab repository page.  If you want a much more public distribution, look
+into [publishing an image on Docker Hub][8] as this is the de facto standard for
+making your images publicly accessible and searchable.
 
 ## Setting up the Build Environment
 
-One of the most frequent issues when it comes to porting software from one
-machine to another is ensuring that the two machines _agree completely_ on what
-the environment for building that code is. When I say "environment", I'm talking
-about the variables that are set on the system as well as the specific versions
-of packages that are installed on the system.
-
-If you're running a Linux distribution and I'm running on Windows and our
-mutual friend is running on MacOS, then there is no chance that we can have
-_all_ of our environment variables match (without some sort of
-virtualization... foreshadowing), but we can ensure that our package versions
-are identical by using a virtual environment manager like [pipenv][1]. Pipenv
-is an easy tool for ensuring that not only do you have the same packages
-installed, but that you have the same minute versions of those packages
-installed. It takes a little bit of getting used to, but once you've adopted it
-the benefits are immense!
-
-Once you start using pipenv, you also have the benefit that your list of
-globally installed packages (the packages that you install when you just run
-`pip install ...`) will become much shorter.
-
-Pipenv is just another python package and can be installed with `pip install pipenv`.
-
-#### Short Intro to Pipenv
-
-There are a few bread-and-butter commands, so I'll cover those first:
-
-| Command                           | Description                                                                                                                                                                                                                                                                                                                          |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `pipenv shell`                    | This enters your shell into the virtual environment or creates an empty one if the directory you're in doesn't contain a Pipfile.                                                                                                                                                                                                    |
-| `pipenv install <package_name>`   | This installs a package into your environment and creates a new environment if the directory you're in doesn't container a Pipfile. If a Pipfile exists but there is no virtual environment stored on your machine, pipenv creates a virtual environment and populates it with packages from the Pipfile.lock.                       |
-| `pipenv lock`                     | This resolves all of the dependencies of all of the packages you've installed and chooses the most modern versions that don't conflict with other package dependencies. It can't be used unless you have a Pipfile. You can also use it to generate your `requirements.txt`                                                          |
-| `pipenv uninstall <package_name>` | Remove a pacakge from your environment. Can't be used unless you have a Pipfile (with whatever package you're trying to remove)                                                                                                                                                                                                      |
-| `pipenv --rm`                     | Deletes the virtual environment for this directory, but keeps the Pipfile and Pipfile.lock. Useful if you've installed extraneous packages into this environment without using pipenv (like `pip install ...` inside of the pipenv shell) or if you are done working on a project for the time being and want to free up some space. |
-
-So to get started, you go to the top level of whatever git repository you're using for your code and run `pipenv shell`. This will create and enter a virtual environment that is completely distinct from your base environment. You can install any packages you like without cluttering up your home environment with `pip` or you can add pacakges to your project with `pipenv install`.
-
-For this project, I added 5 packages: 2 build-time dependencies - build, twine; and 3 development-dependencies - pytest, pytest-cov, coverage. To install run/build time dependencies just use `pipenv install ...`, but if you want to install dependencies that are manually enabled, use `pipenv install --dev ...`. The added benefit is when generating requirements.txt files, your dev packages won't be included (by default).
-
-After you install packages with pipenv, it will automatically generate a `Pipfile` and a `Pipfile.lock` (although you can tell pipenv not to lock). The Pipfile is basically just a meta description of what your project needs. It says things like what version of python the project is running in, what the packages are, what the dev dependencies are, and then some information about where pipenv was installed from. The Pipfile.lock is more specific and contains a hash of all of the packages for your project, hashes for verifying the installation of those packages, the specific version numbers of the packages, the list of dependencies for each installed package, hashes for those, their dependencies, etc.
-
-**YOU SHOULD NEVER ATTEMPT TO MANUALLY EDIT YOUR PIPFILE.LOCK**. In the worst case, it might make your environment uninstallable and you will need to remove the lock file (which will forget all of your pinned versions) in order to correct this. Then you might have to deal with situations where new versions of your dependencies were released that break your code... it's bad. Let pipenv handle the lock file and get familiar with commands arguments for the install, uninstall, and lock commands.
+This repository once again makes use of pipenv for explicit environment control.
+If you are unfamiliar, [see the documentation in this repository][4]. When you
+are getting started, make sure you enter a new virtual environment using:
+```
+pipenv shell
+```
+And make sure that you install all necessary packages from `Pipfile.lock` with:
+```
+pipenv install --dev
+```
 
 ## Testing
 
-For this exercise, we'll focus on unit tests for this package. As you can see
-in the directory, the tests are right along side the normal code in this
-package. This was a choice I made out of convenience because I wanted to do the
-minimal amount of setup with pytest and coverage and if I were to try and
-separate the tests from the source, it would create import complications and
-the coverage would be wrong (by default) and it would just be a whole mess.
+For this demo, the tests we have are different in nature to the ones from the
+`simple_strop` package. In that example, we were concerned only with unit testing the
+logic of individual functions that made very few (if any) calls to external
+code. Here, we want to perform integration and systems testing for the entire
+system including the Flask web server, and the PostgreSQL database server.
 
-You can run the unit tests yourself locally. First install the environment via
-pipenv: `pipenv install --dev`, then you can just run the `pytest` command. If
-you don't include the `--dev` flag, you won't install the packages for unit
-testing and it won't work.
+We are going to use the same `pytest` framework that we used for Part 1.  In
+this repository, you can find the tests written in the three files in the
+`tests` directory. Note that the `__init__.py` file includes the definition of
+pytest fixtures that we reference in both our tests for views and for the utils
+module.
 
-Pytest is configured to also run a code coverage report and save that into a
-directory called `htmlcov`. After running the unit tests, open the file
-`htmlcov/index.html` with a web browser and you'll be able to interactively
-click through each file, see which lines are covered (spoiler alert, it's all
-of them), and see what the coverage of the whole project is.
-
-You can get familiar with how coverage is working by commenting out some of the
-functions in the `src/simple_strop/test_...` files then running `pytest` again
-to see the coverage re-calculated.
-
-## Packaging
-
-For the details on how to create a Python package, I'll direct you [to this
-guide][3].  I created the Python package myself using this guide.  You will see
-in the guide that the `setup.cfg` contains configurable metadata about the
-package.  I'm going to ask you to change the package name from:
+Within the pipenv shell, try running:
 ```
-name = simple-strop-wonsun.ahn
-```
-to (where your.name is your actual name):
-```
-name = simple-strop-<your.name>
+pytest
 ```
 
-This is important since each of you need a unique package name to register on
-PyPI.  Otherwise, PyPI will complain of a name conflict.  For the same reason,
-if you attempt to register the same package twice to PyPI, PyPI will complain.
-So what should you do if you want to update an existing package?  You need to
-increment the version number.
-
-Once you are done editing `setup.cfg`, go ahead and run the build package command in the pipenv virtual environment:
+You should see all tests (except 1) failing:
 ```
-python -m build
+...
+================================================================ 1 passed, 12 errors in 78.56s (0:01:18) =================================================================
 ```
 
-This will run for a few seconds and when it's done, you'll have a few new
-directories: `build/`, `dist/`, `src/simple_strop.<your.name>.egg-info/`. Each of these
-serves its own purpose, but the `dist` directory is how we might actually
-_distribute_ our package.
+Why? That is because neither the web server nor the database server is currently
+running, and without them, nothing works!
 
-Inside of `dist` there should be two files:
+#### Running the Webserver and Docker Compose
 
-- `simple-strop-<your.name>-<version>.tar.gz`
-- `simple_strop-<your.name>-<version>-py3-none-any.whl`
+Like most Flask web servers, the development server can be run using the
+command:
 
-The first file is just a compressed archive of the files in this repository
-that are actually meaningful to the distribution of your project. If you'd
-like, you can open this file (on linux and mac machines natively, windows if
-you have gnu installed) with `tar xf <filename>` and then check out the new
-directory it created with the same name as the tarball.
+```
+flask run
+```
 
-The second file is a "wheel". Wheel is python's format for creating installable
-packages. It's a binary file that contains the source code and instructions to
-pip (or pipenv) on how to actually install the package, what additional needs
-it has (like adding a file to the user's path like pipenv does), etc.
+This will start the server, claim a port (in this instance port 5000), and
+listen for requests. You can start the server like this, then in your browser go
+to [http://localhost:5000/](http://localhost:5000/){target="\_blank"} to see
+that it is working. You should see something like this:
 
-You can actually install packages directly from wheel files with `pip install <path_to_wheel>`
+```
+{
+  "message": "System online."
+}
+```
+
+Unfortunately, this isn't all that must be done. Because the web server assumes
+its access to a database, as soon as you perform some operation that requires
+access to the database, the server will crash rather spectacularly. What we need
+now is to give the server a database to use and we'll accomplish this via
+docker-compose.
+
+To use docker-compose is simple, with docker installed on your machine and the
+docker daemon running, simply run `docker-compose <command>`. You might choose
+`build`, `up`, `down`, `pull`, or any other of the many commands that
+docker-compose provides. When you run this command, the docker-compose
+application will look in the directory where the command was executed for a file
+called `docker-compose.yaml`. This is the default name for docker-compose files,
+but if you want to reference a different file (e.g. dev.docker-compose.yaml or
+test.docker-compose.yaml), you can specify that with the `-f <filename>`
+argument.
+
+In our repo, we only have one docker-compose file, so just running:
+```
+docker-compose build
+```
+
+will suffice. This will take about 3 minutes to complete depending on whether or
+not you've run the command before for this application (it caches very well),
+whether you have the base images, and your machine. This command prepares all of
+the images (remember that images are the virtual machines we talked about in the
+intro) referenced in the compose file to be run as containers (the running
+version of an image).
+
+#### The Dockerfile
+
+Images are defined using a file format called the "Dockerfile". It has a very
+simple syntax and you'll probably only ever need to know a few directives:
+`FROM`, `RUN`, `COPY`, `WORKDIR`, and `CMD`. More complex Dockerfiles can make
+use of directives like `ENTRYPOINT` and `ENV`, but this will do for our example.
+As I describe each of these directives, I encourage you to take a look at the
+Dockerfile in this repository to see an example of what I'm talking about.
+
+The `FROM` directive describes where the Dockerfile should start and the
+argument is the name of an existing image and tag. Tags are a way to
+differentiate versions of an image. For example, the python image has tags for
+3.7, 3.8, 3.9, more specific versions like 3.9.4, versions with different
+operating systems as bases like 3.9.4-slim, and many more. You can find a wealth
+of public and free to use images on [Docker Hub][6].
+
+The `RUN` directive is for executing a command inside of the image you're
+building. This might be to install runtime or buildtime dependencies into the
+image, to create a certain filestructure, or anything else you can dream of.
+Images are not just virtual machines for simulating an operating system, they're
+pared down virtual machines for executing an application in a very specific
+environment. The `RUN` directive helps you define what that environment looks
+like. In our example, we use the `RUN` directive to install `libpg-dev`, `gcc`,
+and other buildtime dependencies for our application. Without these
+dependencies, we won't be able to install the python packages we need later that
+are written partially or entirely in C or reference special C libraries just for
+that application.
+
+The `WORKDIR` directive tells docker which directory you are currently working
+in. Think of this as the docker equivalent of `cd` when you're changing
+directories on your machine, but Docker also remembers where you were. If I
+define `WORKDIR /home/user/documents`, then when I run any commands in the
+container from this image, those commands will run in that directory (unless
+otherwise told not to). In our example, we use a directory called `/app` (which
+is somewhat of a Docker standard) to define where our application lives and
+runs. For the most part, we shouldn't need to affect the file system anywhere
+outside of this directory.
+
+The `COPY` directive is for moving files from outside the container to the
+inside or between containers. This is how we copy in our requirements.txt file
+to install our packages in pip. Note: this is how we can make use of pipenv to
+get pip to install very specific packages. By using `pipenv lock -r`, we can
+generate a `requirements.txt` file that describes all of the packages we need
+and the very specific versions we're expecting. We can then have pip install
+this list of packages directly from the file using the `-r requirements.txt`
+argument. We can also copy files between images. In our Dockerfile, we're using
+a technique called "multi-stage builds". This helps us to keep our images as
+small as possible by defining a build stage where all of the runtime
+dependencies are created, then defining an application stage where we copy over
+those runtime dependencies without needing to build them locally. This prevents
+things like build caches, log files, and other extraneous build artifacts from
+lingering in our images and increasing the size. Multi-stage builds might also
+improve the speed at which your images build because each stage is built
+simultaneously until it requires something from another stage. In order to copy
+files from one stage to another, we must use the `as` keyword in from to give
+our stages names, then use the `--from` argument with `COPY` to specify which
+stage to look in.
+
+The `CMD` directive is for defining what a container for this image should
+default to running. In our example, we want our container to start the server by
+default, so our `CMD` in the Dockerfile is the command to do that. Note that
+even though outside of the container we can run our server with `flask run`, we
+can't make the same assumptions in the container. The commands we run in the
+container don't assume we have a shell, so if a command isn't in PATH, we aren't
+going to be able to use it directly. Here, we first specify to run a shell (bash
+to be specific), then pass it the arguments (-c) `flask run --host 0.0.0.0`. The
+`--host` argument to the `flask run` command is for telling flask where to
+listen. When we ran this command outside of the container, we wanted to access
+our server on localhost (or it's formal name `127.0.0.1`) and that's what flask
+defaults to so we didn't need to specify the host. When we run the server in the
+container, however, we are now running the server on a "different machine" as
+far as flask is concerned, so we don't have access to the same localhost. To
+flask running in the container, it will look like we're accessing the server
+from some strange network address. The `0.0.0.0` is a networking alias (called a
+mask) that says "I don't care where the request is coming from, if it got routed
+to you allow it".
+
+#### Using Docker Compose with our Dockerfile
+
+Now that we understand what our Dockerfile is generally doing, we can start to
+examine how we can use docker-compose to make our lives a little easier. If you
+look in our `docker-compose.yaml` file, you'll see that under services we define
+two keys: `psql` and `server`. These are the two parts of the application:
+`psql` is the common abbreviation for PostgreSQL and `server` is exactly what
+we've made.
+
+For each service, you can see that we defined either an image or build value.
+When we say "image", we're telling docker-compose to create this service from an
+existing image on Docker Hub (unless specifying another registry). Here, we're
+using the public image for PostgreSQL version 13.2. We also load the environment
+variables for our image from the `.env` file so that we can configure the
+database created by the postgres image to use a certain name, have a certain
+password, and so on. Almost all public images have some sort of documentation
+with them that describes how to use the image and [postgres is no exception][7]
+(check out the "How to use this image" section). The last thing we define for
+our `psql` service are a set of ports in the format `<external>:<internal>`
+relative to the image. So what we're saying is "when the host machine receives
+traffic on port 5432, send that into the container on port 5432". More on this
+when we get to the server.
+
+Now let's take a look at our `server` service. Instead of an `image`, here we
+define how to build this service. We specify the build context ("." means "same
+directory as the docker-compose.yaml") and which dockerfile to use (in case we
+had a bunch like "dev.Dockerfile", "test.Dockerfile", etc.). We also give this
+container a name: "flask". This allows us to more easily reference this
+container if we wanted to use some docker command on it while it was running
+like restarting it, opening a shell into it, etc. We also override the command
+from our Dockerfile here. We don't have to do this because the Dockerfile
+already has a command specified, so we could just remove the `command` section
+entirely. In our case, we don't want to run `flask init-db` by default in our
+Dockerfile because if someone ran the container without setting up the database,
+that command would crash on startup. Here with the docker compose, we know we
+have the database service already so we can run this command without concern. We
+also load in the same `.env` file for our environment variables (having both
+services pull these values from the same place means we can update them in one
+spot), but we override some of the values that differ between when we try to run
+from the command line and when we try to run in docker-compose. In
+docker-compose, services are accessible at a url that looks like
+`http://<servicename>:<serviceport>/`, so that is obviously different from the
+localhost that we need if we were running this outside of a container. Here
+again, we define ports but note the difference: we're mapping the external port
+80 to the internal port 5000. Recall that when we ran our webserver from the
+command line, we had to access it with "http://localhost:5000". What this is
+saying is "when you receive traffic on port 80, send it into the container at
+port 5000". Because port 80 is the default port for unencrypted web traffic (443
+is for encrypted), we can access our webserver running in docker-compose with
+`http://localhost/` (or `http://localhost:80/` if we want to be specific).
+Finally, we use the `depends_on` key to specify what services need to be running
+before this service can start. Here, the database needs to be up before we use
+our webserver, so we specify the database service.
+
+Now that we understand what our docker-compose is saying, how can we use it? By
+running `docker-compose build`, we tell the docker-compose application to build
+any of the images with a `build` section defined. We can then run:
+
+```
+docker-compose up
+```
+
+to start the containers from each of the services, setup a virtual network so
+they can talk to each other, and open the port mappings so we can access them!
+Now, if you run your `Docker Desktop` GUI application and click on `Images`, you
+should see two images: `dockerized-server_server` (the Flask server image that
+you built) and `postgres` (the PostgreSQL server image that you pulled from
+Docker Hub).  Also, if you click on `Container / Apps`, you should see
+`dockerized-server` running with the `flask` and `dockerized_server_psql_1`
+containers running under it. 
+
+Note, you can also use `docker-compose up --build` to build the images, then
+start them, `docker-compose pull` to pull any images that aren't built locally,
+and `docker-compose down` to remove all of the containers, network, etc. that is
+stored on your machine to free up space.
+
+Now, we can finally access our server! You can open the python repl by just
+running `python` and try entering in the commands from the example usage at the
+top of this document.  Also, if you run:
+
+```
+pytest
+```
+
+then all tests should pass:
+
+```
+========================================================================== test session starts ===========================================================================
+platform win32 -- Python 3.9.4, pytest-6.2.3, py-1.10.0, pluggy-0.13.1
+rootdir: C:\Users\mrabb\Desktop\Wonsun Ahn\cs1632\gitlab_exercises\dockerized-server, configfile: pytest.ini, testpaths: tests
+plugins: Faker-8.0.0, cov-2.11.1
+collected 13 items
+
+tests\test_utils.py .......                                                                                                                                         [ 53%]
+tests\test_views.py ......                                                                                                                                          [100%]
+
+----------- coverage: platform win32, python 3.9.4-final-0 -----------
+Coverage HTML written to dir htmlcov
+
+
+========================================================================== 13 passed in 24.30s ===========================================================================
+```
 
 ## Distributing
 
-Once you've built the package into `dist`, you can upload it to a package
-directory like PyPI!  But we probably shouldn't clutter up the PyPI with dozens
-of copies of the same package from dozens of students.  There is actually a
-test version of PyPI that developers can use to play around or make sure that
-their package is actually all set for distribution _before_ they publicly
-publish it. [You can find TestPyPI here][2].
-
-The command to upload to TestPyPI is:
-```
-python -m twine upload -r testpypi dist/*
-```
-
-If you wanted to upload to PyPI, you would omit the `-r testpypi`
-(discouraged).  You'll need to create an account with TestPyPI or PyPI to be
-able to upload packages to either.
+The easiest way to publish the Flask image that you just built to the GitLab
+repository-specific registry is through using a GitLab pipeline, so I won't go
+into manually uploading an image.  Again, you can look into [publishing an image on Docker
+Hub][8], if you want to learn more about publishing images.
 
 # Automating CI/CD using Pipelines
 
 Now we are going to automate all the CI/CD steps we described using pipelines.
 
-## Pipelines
-
-The last component of this repository is the CI/CD pipeline. Pipelines are a
-sequence of steps organized into a DAG (directed acyclic graph) for managing
-builds, tests, releases, and anything else that a project might need to go from
-source code to distributable. You can see the configuration for this
-repository's pipeline in the file `.gitlab-ci.yml` in the top level of the
-repository. The `.yml` extension identifies this file as a "yaml" file, almost
-all pipelines are defined in yaml files as they are easy to read and are quite
-flexible. [You can read more about yamls here][4].
-
-At a minimum, a pipeline should have 2 stages: build and deploy (but test is
-also highly recommended!!!). In this repo, we actually have 4 because we need
-to build two times: first to build the dependencies that our pipeline will need
-for testing and second to actually build our source code into the wheel file.
-
-The stages of the pipeline are defined at the top:
-
-```yaml
-stages:
-  - build
-  - test
-  - package
-  - deploy
-```
-
-Each of these will fulfill one part of the process and the final one should
-actually make our package public. So let's dig into each one and understand
-what's happening.
+In the following sections, I'm going to assume you have a basic understanding of
+pipelines.  If you feel you need to refresh your memory, please take a look at the
+[pipelines section in Part 1][9].
 
 ## The `build` Stage
 
-Our build stage only has 1 job in it. A job is a single, focused collection of
-commands to accomplish a specific goal. It is more focused than stages. This
-job is called `build-dependencies` and it is responsible for installing the
-packages we need for the later stages.
-
-In this stage, we see the first occurrence of a "yaml anchor". Anchors can get
-pretty complicated, but the easiest way to think about them are as variables
-but for yaml files: you define a variable with `&variable_name` and you can
-then reference it with `*variable_name`. So when we see:
-
-```yaml
-.cache: &cache
-  key: $CI_COMMIT_REF_SLUG
-  policy: pull
-  paths:
-    - $PIP_CACHE_DIR
-    - $PYTHON_PACKAGE_DIR
-
-build-dependencies:
-  stage: build
-  cache:
-    <<: *cache
-    policy: pull-push
-```
-
-we are defining the anchor `cache` at the top to be the object containing three
-keys: `key`, `policy`, and `paths` where `paths` is an array with two indices.
-We then use our `cache` anchor inside of the `build-dependencies` object with
-the "merge operator" `<<: *variable_name`.
-
-This merge operator is saying, "I want to put the value of this anchor in this
-position as if it were defined here". So after the merge operator, if we
-expanded this file it would look like this:
-
-```yaml
-.cache:
-  key: $CI_COMMIT_REF_SLUG
-  policy: pull
-  paths:
-    - $PIP_CACHE_DIR
-    - $PYTHON_PACKAGE_DIR
-
-build-dependencies:
-  stage: build
-  cache:
-    key: $CI_COMMIT_REF_SLUG
-    policy: pull
-    paths:
-      - $PIP_CACHE_DIR
-      - $PYTHON_PACKAGE_DIR
-    policy: pull-push
-```
-
-Notice that the key "policy" is repeated. In this instance, we want to override
-it from what is defined in our anchor, so we can just define it again and yaml
-will forget the previous value.
-
-Inside of the `build-dependencies` job, we can see that we have defined it to
-be in the stage "build". We also define how we want the cache to work. Defining
-a cache isn't necessary, but it is useful for speeding up repeated builds. In
-this stage, however, we don't want to use the cache, we want to overwrite the
-cache so that it is fresh for this build. Here, we identify a reusable cache by
-the git commit the pipeline was run for (`CI_COMMIT_REF_SLUG`) and say that we
-want to be able to push to this cache.
-
-We also define our "artifacts". Artifacts are files, strings, or directories
-that are the output of a job and are needed for another job or just for later
-reference. In this case, after we install our packages, we want to keep the
-directories where we installed these packages for use in the future stages, so
-we define those directories as artifacts.
-
-Finally, we define our scripts. Before executing the standard script, we make
-sure to delete our old cache and add our cache to our PYTHONPATH environment
-variable. This tells python how to find these packages later. Then we run two
-`pip install` commands to install the packages that we defined in our
-requirements files. Note the usage of variables with `${VARIABLE_NAME}`. This
-allows us to change these values easily in one spot (the variables section) and
-not have to worry about tracking down all of the places in the pipeline we used
-them. GitLab's pipelines support variables in almost any value for key value
-pairs and as environment variables in scripts.
+Comparing with the previous example, notice that the `build` stage is identical.
+We are still going to be building and testing our application in the pipeline
+runner's local environment, so we'll need all of our dependencies. To be clear,
+note that the first two lines of the pipeline are telling the pipeline to run
+all of our commands inside of a python version 3.9 docker image. So when we say
+we're running in the "runner's" local environment, we're actually running in
+_exactly_ the same environment as if we pulled the official python 3.9 image
+from Docker Hub and ran all of these commands inside of it instead.
 
 ## The `test` Stage
 
-```yaml
-test:
-  stage: test
-  cache:
-    <<: *cache
-  artifacts:
-    expire_in: 1 day
-    paths:
-      - htmlcov
-      - .coverage
-  coverage: '/Total coverage: \d+.\d+%$/'
-  script:
-    - python -m pytest
-```
-
-Now that we've built our dependencies, we're ready to run our unit tests. You
-can see that most of the configuration here is very similar to the build stage:
-we pull in our cache anchor (without overriding the default policy), we define
-the coverage output as artifacts, and we run a script. The script here is just
-`python -m pytest` because we already defined `.coveragerc` and `pytest.ini` to
-run our tests with all of the command line flags and configurations that we
-need. Note: when we were running locally, we ran with just `pytest`. The
-command here is logically identical, but a little more specific and helps us
-avoid issues with caching in pipelines.
-
-Note the inclusion of the `coverage` line. That is how we tell gitlab to parse
-the output of this job with the regular expression so that the pipeline can
-report our code coverage at the end.
-
-## The `package` Stage
+Just like last time, after the `build` stage is the `test` stage. Because all of
+our test and coverage configuration is saved in our `.coveragerc` and
+`pytest.ini` files, we can again run everything with just `python -m pytest`.
+This time though, we have a few extra fields:
 
 ```yaml
-build-package:
-  stage: package
-  cache:
-    <<: *cache
-  artifacts:
-    expire_in: 1 day
-    paths:
-      - dist
-  script:
-    - python -m build
+variables:
+    FLASK_APP: flaskr
+    FLASK_ENV: development
+    POSTGRES_DB: db
+    POSTGRES_USER: user
+    POSTGRES_PASSWORD: password
+    POSTGRES_PORT: 5432
+    POSTGRES_HOST: postgres
+services:
+    - postgres:13.2
 ```
 
-This is pretty similar to the previous stages as well, but here we are defining
-our `dist` directory as an artifact. We want to make sure that in the final
-stage, we access it to deploy. We have this stage defined on its own for a few
-reasons: first, we want it to benefit from the cache because it would be very
-annoying to have to rebuild this late in the pipeline; second, we don't want to
-spend the time actually building until we've tested and know that everything is
-working correctly.
+Recall that when we were taking a look at our docker compose configuration, we
+described our environment variables as coming from the `.env` file. When we were
+working in our local virtual environments, these variables were put into our
+entironments automatically by pipenv (which automatically adds variables to your
+environment from a `.env` file when you enter a virtual environment). In our
+pipelines, we don't have the luxury of letting pipenv place our environment
+variables, so we do it ourselves through the `variables` key. Each of these
+values will be placed into the environment of any container and/or service
+running for this job. That includes the container where we run the `pytest`
+command, but it also includes the postgres service we connect to for the tests.
 
-## The `deploy` Stage
+In gitlab pipelines, services are additional running containers. You can't
+specify code to run inside of these containers, but you can specify environment
+variables. Services are ideal for things like test databases that don't need to
+persist and just need to be around long enough for one job. As we saw eariler,
+in order to use the postgres container, we specify the `POSTGRES_...`
+environment variables so that we know what the connection details are. Just this
+small section is enough to tell the pipeline to start the postgres container,
+put the environment variables inside, and leave it running until our unit tests
+are done. The rest of the testing stage is the same, so I won't cover it here,
+but again we are able to simply run the command `python -m pytest` and we're
+good to go.
 
-```yaml
-.release:
-  stage: deploy
-  when: manual
-  cache:
-    <<: *cache
-  dependencies:
-    - build-package
+## The `dockerize` Stage
 
-release to testpypi:
-  extends: .release
-  script:
-    - python -m twine upload -u ${TEST_PYPI_USERNAME} -p ${TEST_PYPI_PASSWORD} -r testpypi dist/*
+This is the deployment stage.  Finally, after testing our code, we're ready to
+dockerize/containerize/build the image (synonyms) and push it to our registry.
+This stage looks complicated, and in some ways it is, but let's take a look at
+it from the perspective of how you would do the same thing on local. Notice, we
+have 3 commands in our script.  These are analogous to logging into the docker
+service, building the image, and pushing the image.
 
-release to pypi:
-  extends: .release
-  script:
-    - python -m twine upload -u ${PYPI_USERNAME} -p ${PYPI_PASSWORD} dist/*
+The first command may be familiar to you if you have used linux before: it is
+simply making a directory. The `-p` argument stands for "parent" and means "if
+any directories along this path don't exist, create them too".
+
+The second command is the equivalent of logging into the docker service. On your
+local machine, you would do something like this with `docker login`. Because
+this login process is interactive, we can't do that exactly in the pipeline, but
+we can build the result directly. Docker stores login credentials in a json
+format in a file called `config.json`. The format of this file is as follows:
+
+```
+{
+	"auths": {
+		"<registry>": {
+			"username": "<username>",
+			"password": "<password>"
+		}
+	}
+}
 ```
 
-Finally, we've built and tested our package and we're ready to hand it off the
-the world! It's time to introduce one final concept of pipelines: templating.
-Templates and anchors share the same basic goal to reduce repetition, but they
-accomplish it in different ways. Anchors are single-file _only_. If I defined a
-pipeline where one file pulled configuration from another, then I couldn't
-reuse the anchors across files. Also, it looks a little cleaner to use
-templates. Whereas before I needed 3 or 4 paragraphs to explain what `<<:` was
-doing, here you see "extends" and already have an idea.
+Because we know this format, we can just create it directly using the common
+unix idiom `echo <file_content> > <filename>`. We get the values of each of
+these from [GitLab's set of pre-defined variables for CI/CD pipelines][11].
+GitLab has dozens of variables that you can use and it helps abstract away a lot
+of the strangeness of working inside of containers.
 
-When we say "extends" here, what we're really saying is "give me everything
-from this job". So in `release to testpypi`, even though I didn't say it there
-it is _as if_ I had defined `stage: deploy` and `when: manual`. Note, I still
-used an anchor inside of my template and I could even have my template extend
-from somewhere else.
+Then, the last command uses the [kaniko executor (provided by google)][10] and
+does the duty of both building and pushing the image to the specified location.
+Up until this moment, I haven't mentioned kaniko and that is for one very
+important reason: it is complicated and atypical. Kaniko is the solution to a
+problem called "docker-in-docker": the idea that within a docker container, we
+wish to build, push, pull, or start another image/container. You can see how
+doing this could wreak havoc on a system's resources if it were to recurse
+indefinitely, so in order to prevent that situation it is somewhat difficult to
+do. Kaniko gets around that by providing an application layer between the user's
+intent and the system which allows for error checking, limiting the scope of the
+user's actions, etc. We have to use kaniko because the pipeline runners are
+accomplishing all of these tasks _within containers_. If these commands were
+just running on some random host machine, we wouldn't have to worry about
+docker-in-docker, but we would have to spend much more time on security and
+access control and concurrency and all of these other problems that docker waves
+away through virtualization.
 
-Though I didn't include it in this repository, I could have set up each of
-these stages to be in their own files called something like `.build.yml`,
-`.test.yml`, etc. Then I could have _included_ those files in my
-`.gitlab-ci.yml` pipeline and used them as if they were defined at the top. In
-that situation, however, I couldn't have used my `cache` anchor so if I wanted
-to share that, I could have broken that out into its own job and had each of
-these other jobs extend from cache. In this small example, that's not really
-worth it. But if I had a huge project with a really big pipeline, then I might
-consider refactoring my pipeline in that way.
+The kaniko command we're using is the executor and this allows us to both build
+and push our image to where it belongs. The command is relatively simple:
+`executor --context <the_directory_where_the_Dockerfile_is> --dockerfile
+<the_dockerfile_to_use> --destination <where_to_push_the_image>`. We can use
+some pre-defined environment variables from GitLab to make this much simpler:
+where is our build context? The top level of our repository, so we can specify
+that location with $CI_PROJECT_DIR. Where is our dockerfile? Well it's in the
+top level of our directory, so we can specify that location with
+`$CI_PROJECT_DIR/Dockerfile`. Finally, where do we want our image to be pushed
+to and what version tag do we want on it? We want to push it to the default
+repository for our project (`$CI_REGISTRY_IMAGE`) with the name `$IMAGE_NAME`
+(defined in our variables section for this job) and the for ease of version
+tracking, let's have the build tag just be the first 8 characters of the commit
+that this pipeline is run for (`$CI_COMMIT_SHORT_SHA`). Those together give us
+our command as you can find it in `.gitlab-ci.yml`.
 
-Additionally, if I was working in an organization, I probably won't want to
-write a pipeline for every project that is more or less the same. I could make
-a repo that just holds pipeline templates and include templates from that repo
-instead! Saves time and ensures that if I ever find a bug in one, I can patch
-all of my pipelines at once.
+With that, our newly built image has been pushed and we can find it in that same
+container registry page on GitLab. There you'll also find instructions to pull
+that image, so you could pull it down and run it locally or give that image path
+to someone else and they can pull it on their machine and through the magic of
+Docker, the microservice contained in that image will behave in _exactly_ the
+same way.
 
-Now with our releases to TestPyPI and PyPI defined, we are ready to deploy! But
-hang on, let's say that we have something to deploy that might break the
-version of our code that our users are already using? Generally speaking, it's
-a bad idea for pipelines to push all the way to production without having some
-sort of user input so we have also defined the `when` value in `.release` to be
-"manual". This will run all of the jobs of the pipeline except for this one,
-then wait for an authorized user's input before continuing.
+## Testing the deployed image
 
-## Invoking the Pipeline
+Let us try pulling the newly deployed image on to our local machine and test it
+ourselves.  For this purpose, I have created a
+`docker-compose-using-registry.yaml` file that is identical to the original
+`docker-compose.yaml` file except that now it downloads the new image from the
+GitLab container registry instead of building it.  Note how the `build` section
+on the `server` service has been replaced by an `image` with a URL to the image
+in the container registry.  You will have to edit the URL to reflect the true
+URL of your image in the registry as shown in:
 
-So when does the above pipeline get invoked?  By default, it runs whenever new
-changes are pushed to the repository.  If you have not already, try committing
-and pushing the changes you made to setup.cfg a while back.
+https://docs.gitlab.com/ee/user/packages/container_registry/
 
-Stage the file:
+Also, the registry is made available to the outside world only if your
+repository is public.  So make sure it is by checking `Settings > General >
+Visibility, project features, permissions` and confirming that `Project
+visibility` is set to `Public`.  If it is not, change it to be so and `Save
+Changes`.
+
+Once you have this set up, first kill all containers that are currently
+running and make sure they are all cleaned up by doing:
+
 ```
-git add setup.cfg
-```
-Then commit the file:
-```
-git commit -m "Changed name of package"
-```
-Then push the file:
-```
-git push
+docker-compose down
 ```
 
-Now, go to your GitLab repository page and click on CI/CD > Pipelines:
-![CI/CD Pipelines](ci_cd_pipelines.png)
+Confirm that your local Docker console shows no containers running.  Now it
+is time to try launching the new image using the following command:
 
-You should a pipeline in the `running` or `passed` state for your commit.  The
-four circles in the `Stages` column indicate the four stages in your pipeline.
-The three check marks indicate that the first three stages (build, test,
-package) have passed.  The last circle with a `>>` sign indicates that the last
-deploy stage is configured to be manually triggered.  If you want to see more
-details on what happened on each stage, you can click on the pipeline link.
+```
+docker-compose -f docker-compose-using-registry.yaml up
+```
 
-If the pipeline is still running, wait until the first three stages have
-completed and it now in passed state.  Now you are ready to trigger the manual
-deploy stage.  But before you do, there is one thing you have to do.  In the
-`.gitlab-ci.yml` file deploy stage, you will have noticed that four variables
-have been used without being defined: TEST_PYPI_USERNAME, TEST_PYPI_PASSWORD,
-PYPI_USERNAME, PYPI_PASSWORD.  These variables were intentionally omitted in
-the script because it is not good practice to expose your credentials in a
-public repository.  These variables can be provided to the script using the
-CI/CD Settings.
+That will launch the new registry image along with the PostgreSQL image as
+before, and you will be able to access the webserver through port 80.  Now
+let's try using pytest in our pipenv shell like before to check that all
+tests pass:
 
-On your GitLab repository page, click on Settings > CI/CD, and expand the Variables menu:
-![CI/CD Settings](ci_cd_settings.png)
+```
+pytest
+```
 
-Now add the two variables TEST_PYPI_USERNAME and TEST_PYPI_PASSWORD as shown in
-the image using the `Add variable` button.  Once you are done, you are now
-ready to deploy.
+And they should, verifying that this new registry image is a fully
+functioning Flask application that is ready for deployment.
 
-Going back to the CI/CD > Pipelines menu, click on the `>>` icon representing
-the last deploy stage, and then click on `release to testpypi`:
-![CI/CD Deploy](ci_cd_deploy.png)
-
-Once it is done running, you should see the `>>` icon turn into a check mark.
-And if you go to https://test.pypi.org and search for the name of your package,
-you should be able to see it deployed!  You should see something similar to:
-https://test.pypi.org/project/simple-strop-wonsun.ahn/
-
-In this way, every time a change is pushed, all the tests are run and a package
-is created ready for upload automatically.  When you feel a need to deploy the
-package, you can click on the corresponding version deploy stage.  FYI, you can
-also invoke the pipeline manually if you wish by clicking on the `Run pipeline`
-button.  Also, software organizations often schedule a regular invocation of
-the pipeline by using the CI/CD > Schedules menu.
-
-[1]: https://pypi.org/project/pipenv/
-[2]: https://test.pypi.org/
-[3]: https://packaging.python.org/tutorials/packaging-projects/
-[4]: https://www.cloudbees.com/blog/yaml-tutorial-everything-you-need-get-started/
+[1]: https://pypi.org/project/requests/
+[3]: https://docs.docker.com/get-docker/
+[4]: https://gitlab.com/wonsun.ahn/simple-python-package#short-intro-to-pipenv
+[5]: https://flask.palletsprojects.com/en/1.1.x/
+[6]: https://hub.docker.com/
+[7]: https://hub.docker.com/_/postgres
+[8]: https://docs.docker.com/docker-hub/publish/publish/
+[9]: https://gitlab.com/wonsun.ahn/simple-python-package#pipelines
+[10]: https://github.com/GoogleContainerTools/kaniko
+[11]: https://docs.gitlab.com/ee/ci/variables/predefined_variables.html
